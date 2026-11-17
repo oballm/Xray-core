@@ -576,7 +576,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			HTTP2:             http2Config,
 		}
 		go func() {
-			if err := l.server.Serve(l.listener); err != nil {
+			if err := l.server.Serve(l.listener); err != nil && err != http.ErrServerClosed {
 				errors.LogErrorInner(ctx, err, "failed to serve HTTP for XHTTP")
 			}
 		}()
@@ -601,7 +601,12 @@ func (ln *Listener) Close() error {
 	if ln.h3server != nil {
 		return ln.h3server.Close()
 	} else if ln.listener != nil {
-		return ln.listener.Close()
+		// Close the server, not just the listener: a CDN keeps its connections
+		// to the origin open and sends every user's requests over them, so
+		// they would otherwise keep reaching this closed instance.
+		err := ln.server.Close()
+		ln.listener.Close()
+		return err
 	}
 	return errors.New("listener does not have an HTTP/3 server or a net.listener")
 }

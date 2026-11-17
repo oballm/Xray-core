@@ -49,6 +49,52 @@ type tcpWorker struct {
 	hub internet.Listener
 
 	ctx context.Context
+
+	conns connTracker
+}
+
+// connTracker holds the connections a worker handed to its proxy, so that
+// closing the worker closes them too. Transports such as WebSocket hand over
+// connections their listener no longer tracks, and those would otherwise keep
+// running on a closed instance.
+type connTracker struct {
+	mu     sync.Mutex
+	conns  map[uint64]stat.Connection
+	nextID uint64
+	closed bool
+}
+
+// add registers conn; false means the worker is closed and conn must not be served.
+func (t *connTracker) add(conn stat.Connection) (uint64, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return 0, false
+	}
+	if t.conns == nil {
+		t.conns = make(map[uint64]stat.Connection)
+	}
+	t.nextID++
+	t.conns[t.nextID] = conn
+	return t.nextID, true
+}
+
+func (t *connTracker) remove(id uint64) {
+	t.mu.Lock()
+	delete(t.conns, id)
+	t.mu.Unlock()
+}
+
+// closeAll closes every tracked connection and refuses new ones.
+func (t *connTracker) closeAll() {
+	t.mu.Lock()
+	t.closed = true
+	conns := t.conns
+	t.conns = nil
+	t.mu.Unlock()
+	for _, conn := range conns {
+		conn.Close()
+	}
 }
 
 func getTProxyType(s *internet.MemoryStreamConfig) internet.SocketConfig_TProxyMode {
@@ -59,6 +105,13 @@ func getTProxyType(s *internet.MemoryStreamConfig) internet.SocketConfig_TProxyM
 }
 
 func (w *tcpWorker) callback(conn stat.Connection) {
+	id, ok := w.conns.add(conn)
+	if !ok {
+		conn.Close()
+		return
+	}
+	defer w.conns.remove(id)
+
 	ctx, cancel := context.WithCancel(w.ctx)
 	sid := session.NewID()
 	ctx = c.ContextWithID(ctx, sid)
@@ -158,6 +211,9 @@ func (w *tcpWorker) Close() error {
 			errs = append(errs, err)
 		}
 	}
+
+	w.conns.closeAll()
+
 	if len(errs) > 0 {
 		return errors.New("failed to close all resources").Base(errors.New(serial.Concat(errs...)))
 	}
@@ -479,9 +535,18 @@ type dsWorker struct {
 	hub internet.Listener
 
 	ctx context.Context
+
+	conns connTracker
 }
 
 func (w *dsWorker) callback(conn stat.Connection) {
+	id, ok := w.conns.add(conn)
+	if !ok {
+		conn.Close()
+		return
+	}
+	defer w.conns.remove(id)
+
 	ctx, cancel := context.WithCancel(w.ctx)
 	sid := session.NewID()
 	ctx = c.ContextWithID(ctx, sid)
@@ -544,6 +609,9 @@ func (w *dsWorker) Close() error {
 			errs = append(errs, err)
 		}
 	}
+
+	w.conns.closeAll()
+
 	if len(errs) > 0 {
 		return errors.New("failed to close all resources").Base(errors.New(serial.Concat(errs...)))
 	}

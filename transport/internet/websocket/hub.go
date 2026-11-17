@@ -137,7 +137,7 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 
 	go func() {
-		if err := l.server.Serve(l.listener); err != nil {
+		if err := l.server.Serve(l.listener); err != nil && err != http.ErrServerClosed {
 			errors.LogWarningInner(ctx, err, "failed to serve http for WebSocket")
 		}
 	}()
@@ -152,7 +152,12 @@ func (ln *Listener) Addr() net.Addr {
 
 // Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
-	return ln.listener.Close()
+	// Also drop idle keep-alive connections so the next upgrade does not
+	// reach this closed instance. Upgraded connections are closed by the
+	// inbound worker.
+	err := ln.server.Close()
+	ln.listener.Close()
+	return err
 }
 
 func init() {
